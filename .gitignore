@@ -1,5 +1,6 @@
 /bin/
 /var/
+/deploy/drill-work/
 *.log
 .env
 .env.*

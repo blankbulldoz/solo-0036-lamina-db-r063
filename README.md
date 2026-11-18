@@ -13,7 +13,7 @@ go build -o bin/laminad ./cmd/laminad
 ./bin/laminad -data var/lamina -listen 127.0.0.1:7386
 ```
 
-数据目录只能由一个进程打开。默认仅监听回环地址；服务没有身份认证，不应直接暴露在不可信网络。进程收到 SIGTERM/SIGINT 后停止接受新请求，等待 HTTP 请求结束，再关闭数据库。没有在退出时强制生成检查点，已成功返回的提交依赖日志恢复。
+数据目录只能由一个进程打开。默认仅监听回环地址；服务没有身份认证，不应直接暴露在不可信网络。进程收到 SIGTERM/SIGINT 后停止接受新请求，在 `-drain-timeout`（默认 10s）内等待进行中的请求结束，再关闭数据库；预算耗尽则强制关闭，已确认的提交不受影响。没有在退出时强制生成检查点，已成功返回的提交依赖日志恢复。`laminad -healthcheck -listen <addr>` 对运行中的实例做健康探测并以退出码报告，供最小镜像的 HEALTHCHECK 使用。
 
 ```sh
 python3 examples/walkthrough.py --workflow all
@@ -100,4 +100,12 @@ docker build -t lamina-db .
 docker run --rm -p 127.0.0.1:7386:7386 -v lamina-volume:/data lamina-db
 ```
 
-镜像使用非特权用户 10001。容器工作流需本机镜像构建可用；原生运行不依赖 Docker。持久目录使用 Unix 文件锁，当前不声明 Windows 支持。备份只能缓解存储故障；没有复制、自动切换或加密。
+镜像使用非特权用户 10001，入口为 `laminad`（默认参数 `-data /data/lamina -listen 0.0.0.0:7386 -drain-timeout 10s`），内置 `STOPSIGNAL SIGTERM` 与不依赖 curl 的 HEALTHCHECK。持久运行方案（只读根文件系统、独立可写数据卷、有界停止、还原 profile）见 `deploy/docker-compose.yml`，策略取舍与演练手册见 `deploy/README.md`：
+
+```sh
+docker compose -f deploy/docker-compose.yml up -d        # 持久运行
+python3 deploy/drill.py --runtime compose                # 全量演练 + 真实数据核对
+python3 deploy/drill.py --runtime local                  # 无 Docker 时在只读沙箱中演练
+```
+
+演练覆盖：已确认提交台账在容器重建后的逐条核对、慢检查点/提交负载中的有界停止、SIGKILL 后的耐久性、同目录第二实例拒绝、异卷还原后的游标边界、写入仅落在数据卷。容器工作流需本机镜像构建可用；原生运行不依赖 Docker。持久目录使用 Unix 文件锁，当前不声明 Windows 支持。备份只能缓解存储故障；没有复制、自动切换或加密。

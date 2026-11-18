@@ -1,0 +1,89 @@
+# LaminaDB durable single-node deployment.
+#
+# Policy summary (see deploy/README.md for the full runbook):
+#   - Durability comes from journal fsync-before-acknowledge, never from the
+#     stop grace period. stop_grace_period only bounds a clean drain; SIGKILL
+#     after it is safe for every acknowledged commit.
+#   - The root filesystem is read-only; only the named volume at /data is
+#     writable. /tmp is a small tmpfs. The process runs as UID 10001 with all
+#     capabilities dropped.
+#   - One writer per data directory is enforced by a Unix file lock inside the
+#     volume; a second container on the same volume fails at startup.
+name: lamina-db
+
+services:
+  laminadb:
+    build:
+      context: ..
+    image: lamina-db:local
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - lamina-data:/data
+    ports:
+      - "127.0.0.1:7386:7386"
+    command: ["-data", "/data/lamina", "-listen", "0.0.0.0:7386", "-drain-timeout", "10s"]
+    stop_signal: SIGTERM
+    # Bounded stop: 10s request drain + in-flight checkpoint/commit bounded by
+    # the 128MiB image limit + journal close. 30s covers this with margin; the
+    # orchestrator's SIGKILL afterwards loses nothing that was acknowledged.
+    stop_grace_period: 30s
+    restart: unless-stopped
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laminad", "-healthcheck", "-listen", "127.0.0.1:7386"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  lamina-restore:
+    # One-shot restore rehearsal target. Installs deploy/drill-work/backup.lmi
+    # (produced by deploy/drill.py or `curl -o` from GET /v1/lamina/backup)
+    # into a separate volume and serves it on 127.0.0.1:7387.
+    #
+    # restart "no" is deliberate: restore requires a new directory, so a
+    # restarted container against an initialized restore volume must fail once
+    # instead of crash-looping. Re-run the drill by removing the volume:
+    #   docker compose --profile restore rm -sf lamina-restore
+    #   docker volume rm lamina-db_lamina-restored
+    profiles: ["restore"]
+    image: lamina-db:local
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - lamina-restored:/data
+      - ./drill-work:/backup:ro
+    ports:
+      - "127.0.0.1:7387:7386"
+    command: ["-data", "/data/lamina", "-listen", "0.0.0.0:7386", "-restore", "/backup/backup.lmi"]
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    restart: "no"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/laminad", "-healthcheck", "-listen", "127.0.0.1:7386"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  lamina-data:
+  lamina-restored:
